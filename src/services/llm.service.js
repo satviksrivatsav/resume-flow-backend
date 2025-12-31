@@ -5,100 +5,135 @@ dotenv.config();
 
 const client = new InferenceClient(process.env.HF_TOKEN);
 
-const SYSTEM_PROMPT = `You are an expert resume consultant. Your job is to help the user improve their resume.
-You will receive a conversation history, user context (resume data), and an optional specific action (like "rewrite").
-You MUST respond IN JSON FORMAT ONLY. Do not include any text outside the JSON block.
+const SYSTEM_PROMPT_BASE = `You are a Resume Expert AI. 
+Your goal is to assist users in creating high-quality, professional resumes.
+You must output your response in strict JSON format.
+NO preamble, NO markdown code blocks, JUST the JSON object.
 
-The JSON structure must be:
+Response Schema:
 {
-  "message": "Your conversational response to the user.",
-  "suggestedUpdates": {
-    // Optional: Only include this if you are suggesting concrete changes to the resume data.
-    // The keys should match the resume sections provided in the context (e.g., "workExperience").
-    // Each item must have its ID if updating an existing item.
+  "message": "Conversational text for the user...",
+  "suggestedUpdates": { 
+      // Optional: Only if data should change.
+      // Keys must match ResumeData section names (e.g., "workExperience").
+      // Arrays should contain objects with "id" matching the input.
   }
 }
-
-Example:
-User says: "Rewrite the description for my Google role."
-Context: { "workExperience": [{ "id": "1", "company": "Google", "description": "Did backend work." }] }
-
-Response:
-{
-  "message": "I've rewritten the description to be more impact-driven.",
-  "suggestedUpdates": {
-    "workExperience": [{ "id": "1", "company": "Google", "description": "Engineered scalable backend services..." }]
-  }
-}
-
-Keep your "message" helpful and concise.
-If the user asks a general question, just provide the "message".
-If the user asks to rewrite or improve, provide "suggestedUpdates".
 `;
 
-export async function generateChatResponse(messages, context, action) {
+/**
+ * Constructs the core prompt based on the action.
+ */
+function constructPrompt(action, userInstruction, context) {
+  let specificInstruction = "";
+  let dataContextString = "";
+
+  if (context && context.data) {
+    dataContextString = JSON.stringify(context.data, null, 2);
+  }
+
+  switch (action) {
+    case 'REWRITE':
+      specificInstruction = `
+Action: REWRITE
+Target: ${context.targetSection || 'General'} (ID: ${context.targetId || 'N/A'})
+Instruction: ${userInstruction || 'Improve this text.'}
+Data to Rewrite:
+${dataContextString}
+
+Task: Rewrite the fields in the data to be better. Return the updated fields in 'suggestedUpdates' under the section '${context.targetSection}'. Ensure IDs are preserved.
+Answer with a helpful message explaining what you changed.
+`;
+      break;
+    case 'SUMMARIZE':
+      specificInstruction = `
+Action: SUMMARIZE
+Data:
+${dataContextString}
+
+Task: Create a professional summary based on the provided data.
+Return the result in 'suggestedUpdates.personalInfo.summary'.
+Answer with "Here is a draft summary based on your experience."
+`;
+      break;
+    case 'FIX_GRAMMAR':
+      specificInstruction = `
+Action: FIX_GRAMMAR
+Data:
+${dataContextString}
+
+Task: Correct grammar and spelling in the data. Return updates in 'suggestedUpdates'.
+`;
+      break;
+    case 'CHAT':
+    default:
+      specificInstruction = `
+Action: CHAT
+User Input: ${userInstruction}
+Context Data (Reference only):
+${dataContextString}
+
+Task: Answer the user's question. If you suggest specific changes to the resume textual content, you CAN include them in 'suggestedUpdates', but mostly just chat.
+`;
+      break;
+  }
+
+  return specificInstruction;
+}
+
+export async function processAIRequest({ action, history, userInstruction, context }) {
   try {
-    // Construct the context string
-    const contextString = JSON.stringify(context, null, 2);
-    
-    // Construct the final user message
-    // We append the context to the latest message or system instruction effectively
-    // But since this is a chat, we'll append it to the last user message or as a separate system-like user message.
-    
-    const relevantMessages = messages.map(m => ({
-        role: m.role,
-        content: m.content
-    }));
+    const promptContent = constructPrompt(action, userInstruction, context);
 
-    // Add instructions and context to the last message or as a new context message
-    const lastMessage = relevantMessages[relevantMessages.length - 1];
-    
-    let promptContent = `
-    Context (Resume Data):
-    ${contextString}
-    
-    Action: ${action || "chat"}
-    `;
-
-    if (lastMessage && lastMessage.role === 'user') {
-        lastMessage.content += `\n\n${promptContent}`;
-    } else {
-        relevantMessages.push({
-            role: 'user',
-            content: promptContent
-        });
-    }
-
-    const payload = [
-        { role: "system", content: SYSTEM_PROMPT },
-        ...relevantMessages
+    // Build messages array
+    // 1. System Prompt
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT_BASE }
     ];
 
+    // 2. History (Last 10)
+    if (history && history.length > 0) {
+      messages.push(...history.slice(-10));
+    }
+
+    // 3. Current Turn
+    messages.push({
+      role: "user",
+      content: promptContent
+    });
+
     const chatCompletion = await client.chatCompletion({
-        model: "Qwen/Qwen2.5-7B-Instruct", 
-        messages: payload,
-        temperature: 0.7,
-        max_tokens: 2048, 
-        response_format: { type: "json_object" } // Enforce JSON if supported, otherwise prompt does it
+      model: "Qwen/Qwen2.5-7B-Instruct",
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 2048,
+      response_format: { type: "json_object" }
     });
 
     const content = chatCompletion.choices[0].message.content;
-    
-    // Parse JSON
+    const tokensUsed = 0; // Usage stats not always available in standard HF inference response wrapper, setting 0 for now.
+
     try {
-        const parsed = JSON.parse(content);
-        return parsed;
+      // Sanitize potential markdown blocks if the model ignores the "no markdown" rule
+      const jsonString = content.replace(/```json/g, '').replace(/```/g, '').trim();
+      const parsed = JSON.parse(jsonString);
+
+      return {
+        message: parsed.message || "Processed your request.",
+        suggestedUpdates: parsed.suggestedUpdates,
+        tokensUsed
+      };
     } catch (e) {
-        console.error("Failed to parse LLM response as JSON:", content);
-        // Fallback if model fails to output JSON
-        return {
-            message: "I processed your request, but I had trouble structuring the update. Here is my raw response: " + content,
-            suggestedUpdates: {}
-        };
+      console.error("Failed to parse LLM response as JSON:", content);
+      return {
+        message: "I processed your request, but there was a technical issue formatting the response. " + content.substring(0, 100) + "...",
+        suggestedUpdates: null,
+        tokensUsed
+      };
     }
 
   } catch (error) {
     console.error("LLM Service Error:", error);
-    throw new Error("Failed to communicate with AI service");
+    throw new Error("AI Service Unavailable");
   }
 }

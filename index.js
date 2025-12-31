@@ -11,7 +11,7 @@ app.use(cors());
 // app.use(express.static('.')); // User asked to remove test.html concept, so we can remove static serving of root if not needed, or keep it. I will keep it for now but remove the file.
 
 // Mount specific routes
-app.use('/api/ai', aiRoutes);
+app.use('/api/v1/ai', aiRoutes);
 
 // Basic health check
 app.get('/', (req, res) => {

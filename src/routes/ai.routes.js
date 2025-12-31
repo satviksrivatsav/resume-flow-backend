@@ -3,6 +3,6 @@ import { handleChat } from '../controllers/ai.controller.js';
 
 const router = express.Router();
 
-router.post('/chat', handleChat);
+router.post('/process', handleChat);
 
 export default router;

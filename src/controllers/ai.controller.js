@@ -1,17 +1,50 @@
-import { generateChatResponse } from '../services/llm.service.js';
+import { processAIRequest } from '../services/llm.service.js';
+import crypto from 'crypto';
 
 export const handleChat = async (req, res) => {
-    try {
-        const { messages, context, action } = req.body;
+    const startTime = Date.now();
+    const requestId = crypto.randomUUID();
 
-        if (!messages || !Array.isArray(messages) || messages.length === 0) {
-            return res.status(400).json({ error: 'Messages array is required' });
+    try {
+        const { action, history, userInstruction, context } = req.body;
+
+        // 1. Validate Schema
+        if (!action || !['CHAT', 'REWRITE', 'SUMMARIZE', 'FIX_GRAMMAR'].includes(action)) {
+            return res.status(400).json({ error: 'INVALID_SCHEMA: Invalid or missing action' });
         }
 
-        const result = await generateChatResponse(messages, context || {}, action);
-        res.json(result);
+        if (action === 'REWRITE' && (!context || !context.data)) {
+            return res.status(400).json({ error: 'MISSING_CONTEXT: Action REWRITE requires context.data' });
+        }
+
+        // 2. Process Request via Service
+        const aiResult = await processAIRequest({
+            action,
+            history: history || [],
+            userInstruction,
+            context: context || {}
+        });
+
+        // 3. Construct Response
+        const responsePayload = {
+            id: requestId,
+            message: aiResult.message,
+            suggestedUpdates: aiResult.suggestedUpdates || null,
+            meta: {
+                tokensUsed: aiResult.tokensUsed || 0, // Placeholder if not returned by service
+                processingTimeMs: Date.now() - startTime,
+                model: "Qwen/Qwen2.5-7B-Instruct"
+            }
+        };
+
+        res.json(responsePayload);
+
     } catch (error) {
         console.error('Controller Error:', error);
-        res.status(500).json({ error: error.message });
+        // Map specific errors if needed
+        res.status(500).json({
+            error: 'PROVIDER_ERROR',
+            message: error.message
+        });
     }
 };
