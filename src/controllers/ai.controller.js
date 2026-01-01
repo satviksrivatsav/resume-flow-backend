@@ -1,47 +1,58 @@
-import { processAIRequest } from '../services/llm.service.js';
+import { processFieldRequest } from '../services/llm.service.js';
 import crypto from 'crypto';
 
-export const handleChat = async (req, res) => {
+export const handleFieldRequest = async (req, res) => {
     const startTime = Date.now();
-    const requestId = crypto.randomUUID();
+    const requestId = `resp_${crypto.randomUUID().substring(0, 8)}`;
 
     try {
-        const { action, history, userInstruction, context } = req.body;
+        const { action, fieldName, originalText, instruction, tone, format } = req.body;
 
-        // 1. Validate Schema
-        if (!action || !['CHAT', 'REWRITE', 'SUMMARIZE', 'FIX_GRAMMAR'].includes(action)) {
-            return res.status(400).json({ error: 'INVALID_SCHEMA: Invalid or missing action' });
+        // Validate Schema
+        if (!action || !['REWRITE', 'GENERATE'].includes(action)) {
+            return res.status(400).json({
+                error: 'INVALID_ACTION',
+                message: 'Action must be REWRITE or GENERATE'
+            });
         }
 
-        if (action === 'REWRITE' && (!context || !context.data)) {
-            return res.status(400).json({ error: 'MISSING_CONTEXT: Action REWRITE requires context.data' });
+        if (!fieldName) {
+            return res.status(400).json({
+                error: 'MISSING_FIELD',
+                message: 'fieldName is required'
+            });
         }
 
-        // 2. Process Request via Service
-        const aiResult = await processAIRequest({
+        if (action === 'REWRITE' && !originalText) {
+            return res.status(400).json({
+                error: 'MISSING_TEXT',
+                message: 'originalText is required for REWRITE action'
+            });
+        }
+
+        // Process Request
+        const result = await processFieldRequest({
             action,
-            history: history || [],
-            userInstruction,
-            context: context || {}
+            fieldName,
+            originalText: originalText || '',
+            instruction: instruction || '',
+            tone: tone || '',
+            format: format || ''
         });
 
-        // 3. Construct Response
-        const responsePayload = {
+        // Response
+        res.json({
             id: requestId,
-            message: aiResult.message,
-            suggestedUpdates: aiResult.suggestedUpdates || null,
+            newText: result.newText,
             meta: {
-                tokensUsed: aiResult.tokensUsed || 0, // Placeholder if not returned by service
                 processingTimeMs: Date.now() - startTime,
-                model: "Qwen/Qwen2.5-7B-Instruct"
+                action,
+                fieldName
             }
-        };
-
-        res.json(responsePayload);
+        });
 
     } catch (error) {
         console.error('Controller Error:', error);
-        // Map specific errors if needed
         res.status(500).json({
             error: 'PROVIDER_ERROR',
             message: error.message
